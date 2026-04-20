@@ -58,8 +58,9 @@
 | Day 2 | PDF 解析與文字分塊 |
 | Day 3 | Vertex AI Batch Embedding + FAISS 索引建立 |
 | Day 4 | Gemini Vision 圖表萃取（高碳排產業優先） |
-| Day 5-6 | 公司摘要生成（Step 07，三段式萃取） |
-| Day 7 | FastAPI 部署 Cloud Run + LINE Bot 上線 |
+| Day 5 | 公司摘要生成（Step 07，三段式萃取） |
+| Day 6 | FastAPI 部署 Cloud Run + LINE Bot 上線 |
+| Day 7 | API 實測修正 LLM Prompt |
 
 ---
 
