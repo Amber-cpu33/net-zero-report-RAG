@@ -4,7 +4,7 @@
 
 ---
 
-![LINE Bot QR Code](LINE_BOT.png)
+<img width="360" height="360" alt="LINE_BOT" src="https://github.com/user-attachments/assets/96afa52c-2df8-4ed6-a00a-07137e58aee4" />
 
 加入 LINE Bot，直接用中文提問：「台積電的碳排放數據？」、「比較鴻海與廣達的再生能源使用率」
 
