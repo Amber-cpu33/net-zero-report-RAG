@@ -1,0 +1,24 @@
+FROM asia-east1-docker.pkg.dev/net-zero-report-rag/esg-pipeline-repo/esg-rag-api:latest AS previous
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=previous /app/packages /app/packages
+COPY --from=previous /app/faiss_index /app/faiss_index
+
+ENV PYTHONPATH="/app/packages:${PYTHONPATH:-}"
+
+COPY main.py state.py search.py rag.py line_bot.py ./
+
+ENV PORT=8080
+ENV PYTHONUNBUFFERED=1
+
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+CMD exec python -m uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 1 --timeout-keep-alive 30

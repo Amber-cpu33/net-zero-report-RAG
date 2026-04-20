@@ -1,0 +1,41 @@
+steps:
+  # Step 1: 從 GCS 下載 FAISS 索引
+  - name: 'gcr.io/cloud-builders/gsutil'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - 'mkdir -p faiss_index && gsutil -m cp "gs://net-zero-report-rag-esg-pipeline/faiss/*" faiss_index/'
+
+  # Step 2: Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '$_IMAGE_FULL'
+      - '-t'
+      - '$_IMAGE_NAME:latest'
+      - '.'
+
+  # Step 3: Push Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '$_IMAGE_FULL']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '$_IMAGE_NAME:latest']
+
+  # 完整 build 成功後，記錄已部署的 faiss 版本
+  - name: 'gcr.io/cloud-builders/gsutil'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        BUILT_AT=$$(python3 -c "import json; print(json.load(open('faiss_index/index_stats.json'))['built_at'])")
+        echo -n "$$BUILT_AT" | gsutil cp - gs://net-zero-report-rag-esg-pipeline/faiss/last_deployed_built_at.txt
+
+substitutions:
+  _IMAGE_NAME: 'asia-east1-docker.pkg.dev/net-zero-report-rag/esg-pipeline-repo/esg-rag-api'
+  _IMAGE_FULL: 'asia-east1-docker.pkg.dev/net-zero-report-rag/esg-pipeline-repo/esg-rag-api:latest'
+
+options:
+  machineType: 'E2_MEDIUM'
+  diskSizeGb: 20
