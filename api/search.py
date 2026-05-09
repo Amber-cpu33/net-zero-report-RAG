@@ -7,14 +7,16 @@ import logging
 import re
 from typing import Optional
 
+import jieba
 import faiss
 import numpy as np
+from rank_bm25 import BM25Okapi
 from vertexai.language_models import TextEmbeddingInput
 
 from state import (
     state,
     EMBEDDING_DIM, OVERVIEW_BOOST, MIN_RELEVANCE_SCORE,
-    MIN_CHUNK_TEXT_LEN, TOP_K_RESULTS,
+    MIN_CHUNK_TEXT_LEN, TOP_K_RESULTS, USE_BM25, RRF_K,
 )
 
 log = logging.getLogger(__name__)
@@ -73,6 +75,9 @@ def embed_query(text: str) -> np.ndarray:
     return vector
 
 
+TOC_PENALTY = 0.3  # 非結構性查詢時目錄 chunk 的分數乘數
+
+
 def search_esg_knowledge_base(
     query: str,
     top_k: int = TOP_K_RESULTS,
@@ -80,6 +85,7 @@ def search_esg_knowledge_base(
     tickers_filter: Optional[list[str]] = None,
     industry_filter: Optional[str] = None,
     min_score: Optional[float] = None,
+    structural_query: bool = False,
 ) -> list[dict]:
     """
     語意搜尋 FAISS 向量庫，回傳最相關的 chunks。
@@ -91,8 +97,6 @@ def search_esg_knowledge_base(
         raise RuntimeError("FAISS 索引未載入")
 
     query_vector = embed_query(query)
-    keywords = [kw for kw in query.split() if len(kw) >= 2]
-
     candidate_indices: Optional[list[int]] = None
     if tickers_filter and state.ticker_chunk_indices:
         candidate_indices = []
@@ -117,44 +121,77 @@ def search_esg_knowledge_base(
         raw_scores, raw_indices = state.faiss_index.search(query_vector, k=search_k)
         pairs = list(zip(raw_scores[0], raw_indices[0]))
 
+    # FAISS 排名表：{global_idx: rank}
+    faiss_ranks = {idx: rank for rank, (_, idx) in enumerate(pairs) if idx >= 0}
+
+    # BM25 搜尋（限定 candidate_indices 範圍）
+    bm25_ranks: dict[int, int] = {}
+    if USE_BM25 and state.bm25_index is not None:
+        query_tokens = list(jieba.cut(query))
+        if candidate_indices is not None:
+            if state.bm25_corpus_tokens is not None:
+                # 子集重建 BM25（精確 IDF）
+                candidate_texts = [state.bm25_corpus_tokens[i] for i in candidate_indices]
+                sub_bm25 = BM25Okapi(candidate_texts)
+                bm25_scores = sub_bm25.get_scores(query_tokens)
+                ranked = sorted(
+                    enumerate(candidate_indices), key=lambda x: bm25_scores[x[0]], reverse=True
+                )
+                bm25_ranks = {global_idx: rank for rank, (_, global_idx) in enumerate(ranked)}
+            else:
+                # 用全庫 BM25 分數取 candidate 子集排名（bm25_index.pkl 模式）
+                all_scores = state.bm25_index.get_scores(query_tokens)
+                ranked = sorted(candidate_indices, key=lambda i: all_scores[i], reverse=True)
+                bm25_ranks = {global_idx: rank for rank, global_idx in enumerate(ranked)}
+        else:
+            bm25_scores = state.bm25_index.get_scores(query_tokens)
+            ranked_indices = np.argsort(bm25_scores)[::-1]
+            bm25_ranks = {int(idx): rank for rank, idx in enumerate(ranked_indices)}
+
+    # 決定要輸出的候選集（FAISS + BM25 聯集，上限 top_k * 5）
+    candidate_set = set(faiss_ranks.keys())
+    if bm25_ranks:
+        top_bm25 = sorted(bm25_ranks, key=bm25_ranks.get)[:top_k * 3]
+        candidate_set.update(top_bm25)
+
     results = []
-    for score, idx in pairs:
+    for idx in candidate_set:
         if idx < 0 or idx >= len(state.metadata):
             continue
         meta = state.metadata[idx]
 
-        text = meta.get("text", "")
-        if keywords:
-            matched = sum(1 for kw in keywords if kw in text)
-            keyword_boost = 0.05 * matched / len(keywords)
-        else:
-            keyword_boost = 0.0
+        # RRF 融合分數
+        faiss_rrf = 1.0 / (RRF_K + faiss_ranks.get(idx, 9999))
+        bm25_rrf  = 1.0 / (RRF_K + bm25_ranks.get(idx, 9999)) if bm25_ranks else 0.0
+        rrf_score = faiss_rrf + bm25_rrf
 
-        adjusted_score = float(score) + keyword_boost
         if meta.get("is_overview"):
-            adjusted_score += OVERVIEW_BOOST
+            rrf_score += OVERVIEW_BOOST * 0.1  # overview boost 縮小比例，避免干擾 RRF
+
+        if meta.get("is_toc") and not structural_query:
+            rrf_score *= TOC_PENALTY
 
         results.append({
-            "score":            round(adjusted_score, 4),
+            "score":            round(rrf_score, 6),
             "chunk_id":         meta.get("chunk_id", ""),
             "company":          meta.get("company", ""),
             "ticker":           meta.get("ticker", ""),
             "industry":         meta.get("industry", ""),
             "text":             meta.get("text", ""),
-            "data_year":        meta.get("data_year"),
+            "data_year":        meta.get("report_year"),
             "category":         meta.get("category", "text"),
             "indicator":        meta.get("indicator", ""),
             "value":            meta.get("value"),
-            "unit":             meta.get("unit", ""),
             "source_page":      (meta.get("source_pages") or [None])[0],
             "is_overview":      meta.get("is_overview", False),
-            "confidence_score": meta.get("confidence_score", 1.0),
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    threshold = min_score if min_score is not None else MIN_RELEVANCE_SCORE
-    results = [r for r in results if r["score"] >= threshold
-               and len(r.get("text", "")) >= MIN_CHUNK_TEXT_LEN]
+    # RRF 分數不在 0~1 cosine 空間，只過濾文字長度；min_score 僅在純向量模式生效
+    if not USE_BM25 or state.bm25_index is None:
+        threshold = min_score if min_score is not None else MIN_RELEVANCE_SCORE
+        results = [r for r in results if r["score"] >= threshold]
+    results = [r for r in results if len(r.get("text", "")) >= MIN_CHUNK_TEXT_LEN]
     return results[:top_k]
 
 

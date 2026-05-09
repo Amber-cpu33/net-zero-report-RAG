@@ -50,30 +50,36 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
-def search_sustaihub(short_name: str, year: int) -> str | None:
-    keyword = normalize_name(short_name)
-    url = f"{SUSTAIHUB_BASE}?keyword={requests.utils.quote(keyword)}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20, verify=False)
-        resp.raise_for_status()
-    except Exception as e:
-        log.warning(f"  SustaiHub 請求失敗：{e}")
-        return None
+def search_sustaihub(short_name: str, year: int, full_name: str = "") -> str | None:
+    candidates = [normalize_name(short_name)]
+    if full_name and normalize_name(full_name) != candidates[0]:
+        candidates.append(normalize_name(full_name))
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for card in soup.select("li.relative.rounded-3xl"):
-        ga_link = card.select_one("a.ga-track[data-report-info]")
-        if not ga_link:
+    for keyword in candidates:
+        url = f"{SUSTAIHUB_BASE}?keyword={requests.utils.quote(keyword)}"
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=20, verify=False)
+            resp.raise_for_status()
+        except Exception as e:
+            log.warning(f"  SustaiHub 請求失敗：{e}")
             continue
-        report_info = ga_link.get("data-report-info", "")
-        if str(year) not in report_info:
-            continue
-        if normalize_name(short_name) not in report_info:
-            continue
-        dl = card.find("a", href=lambda h: h and ("FileStream" in h or "FileDownLoad" in h))
-        if dl:
-            log.info(f"  ✓ 找到：{report_info}")
-            return dl.get("href")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for card in soup.select("li.relative.rounded-3xl"):
+            ga_link = card.select_one("a.ga-track[data-report-info]")
+            if not ga_link:
+                continue
+            report_info = ga_link.get("data-report-info", "")
+            if str(year) not in report_info:
+                continue
+            if keyword not in report_info:
+                continue
+            dl = card.find("a", href=lambda h: h and ("FileStream" in h or "FileDownLoad" in h))
+            if dl:
+                log.info(f"  ✓ 找到（keyword={keyword}）：{report_info}")
+                return dl.get("href")
+        time.sleep(REQUEST_DELAY)
+
     return None
 
 
@@ -122,7 +128,8 @@ def main():
             skipped.append(ticker)
             continue
 
-        pdf_url = search_sustaihub(short_name, REPORT_YEAR)
+        full_name = company.get("company", "")
+        pdf_url = search_sustaihub(short_name, REPORT_YEAR, full_name)
         if not pdf_url:
             log.warning(f"  ✗ SustaiHub 找不到")
             failed.append({"ticker": ticker, "name": short_name, "reason": "not_found"})

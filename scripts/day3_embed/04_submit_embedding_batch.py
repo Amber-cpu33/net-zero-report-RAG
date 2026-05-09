@@ -55,7 +55,7 @@ def list_chunk_files(gcs_client: storage.Client) -> list[str]:
 
 
 def load_chunks_from_gcs(gcs_client: storage.Client, blob_name: str) -> list[dict]:
-    content = gcs_client.bucket(BUCKET_NAME).blob(blob_name).download_as_text(encoding="utf-8")
+    content = gcs_client.bucket(BUCKET_NAME).blob(blob_name).download_as_text(encoding="utf-8-sig")
     return [json.loads(line) for line in content.strip().split("\n") if line.strip()]
 
 
@@ -147,13 +147,17 @@ def main():
         log.error("找不到任何 chunk 檔案，請先執行 Step 3")
         return
 
-    if TIER > 0:
+    manual_tickers = set(sys.argv[1:])
+    if manual_tickers:
+        chunk_blob_names = [b for b in chunk_blob_names if b.split("/")[-1].split("_")[0] in manual_tickers]
+        log.info(f"手動模式：{len(chunk_blob_names)} 個 chunk 檔案")
+    elif TIER > 0:
         company_list = json.loads(
             gcs_client.bucket(BUCKET_NAME).blob(
                 f"company_data/company_list_{REPORT_YEAR}.json"
             ).download_as_text()
         )
-        allowed = {c["ticker"] for c in company_list if c.get("priority", 4) == TIER}
+        allowed = {c["ticker"] for c in company_list if c.get("priority", 4) <= TIER}
         chunk_blob_names = [b for b in chunk_blob_names if b.split("/")[-1].split("_")[0] in allowed]
         log.info(f"TIER={TIER}，篩選後：{len(chunk_blob_names)} 個 chunk 檔案")
 

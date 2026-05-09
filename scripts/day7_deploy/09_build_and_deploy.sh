@@ -34,10 +34,10 @@ IMAGE_FULL="${IMAGE_NAME}:${IMAGE_TAG}"
 # Cloud Run 設定（Scale-to-Zero 是省錢關鍵）
 MIN_INSTANCES=0           # 無流量時縮放至零（不收費）
 MAX_INSTANCES=3           # 最大實例數（防止意外暴增費用）
-MEMORY="2Gi"              # FAISS 索引 493 家 ~362MB，2Gi 足夠（Tier 1+2：台灣50+高碳排/高電耗科技業）
-CPU="1"                   # 1 vCPU 足夠輕量推論
+MEMORY="6Gi"              # FAISS 439MB + BM25 tokens + BM25Okapi 倒排索引，4Gi OOM（實測 4274 MiB）
+CPU="2"                   # 2 vCPU（6Gi 記憶體需求，1 vCPU 上限 4Gi）
 CONCURRENCY=5             # 每個實例同時處理請求數（sync threadpool 1 vCPU ≈ 5）
-REQUEST_TIMEOUT=60        # 請求逾時（秒，Agentic RAG 多輪 function calling 需較長時間）
+REQUEST_TIMEOUT=120       # 請求逾時（秒，複雜查詢如 compare/metric 需 60s+）
 
 # 路徑設定
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,8 +90,20 @@ gcloud config set project "${PROJECT_ID}" --quiet
 gcloud config set run/region "${REGION}" --quiet
 success "GCP 專案設定完成"
 
-# ── Step 2: 確保 Artifact Registry 存在 ──────────────────────
-info "Step 2：確認 Artifact Registry..."
+# ── Step 2: 規格預檢（Cloud Run CPU/Memory 限制）────────────
+# 1 vCPU → max 4Gi, 2 vCPU → max 8Gi, 4 vCPU → max 16Gi
+MEM_NUM="${MEMORY//[^0-9]/}"
+if [ "${CPU}" = "1" ] && [ "${MEM_NUM}" -gt 4 ]; then
+    error "規格不合法：1 vCPU 最多支援 4Gi 記憶體（目前設定 ${MEMORY}），請調整 CPU 或 MEMORY"
+elif [ "${CPU}" = "2" ] && [ "${MEM_NUM}" -gt 8 ]; then
+    error "規格不合法：2 vCPU 最多支援 8Gi 記憶體（目前設定 ${MEMORY}），請調整 CPU 或 MEMORY"
+elif [ "${CPU}" = "4" ] && [ "${MEM_NUM}" -gt 16 ]; then
+    error "規格不合法：4 vCPU 最多支援 16Gi 記憶體（目前設定 ${MEMORY}），請調整 CPU 或 MEMORY"
+fi
+success "規格預檢通過：CPU=${CPU} MEMORY=${MEMORY}"
+
+# ── Step 3: 確保 Artifact Registry 存在 ──────────────────────
+info "Step 3：確認 Artifact Registry..."
 if ! gcloud artifacts repositories describe esg-pipeline-repo \
     --location="${REGION}" --quiet 2>/dev/null; then
     info "建立 Artifact Registry esg-pipeline-repo..."
@@ -104,7 +116,7 @@ else
     success "Artifact Registry 已存在"
 fi
 
-# ── Step 3: Cloud Build（比較 faiss 版本，選擇快速或完整路徑） ─
+# ── Step 4: Cloud Build（比較 faiss 版本，選擇快速或完整路徑） ─
 GCS_CURRENT=$(gsutil cat "gs://${GCS_BUCKET}/faiss/index_stats.json" 2>/dev/null \
     | grep -oP '"built_at":\s*"\K[^"]*' || echo "")
 GCS_DEPLOYED=$(gsutil cat "gs://${GCS_BUCKET}/faiss/last_deployed_built_at.txt" 2>/dev/null || echo "")
@@ -124,14 +136,15 @@ fi
 gcloud builds submit "${API_DIR}" \
     --config="${CLOUDBUILD_CONFIG}" \
     --substitutions="_IMAGE_FULL=${IMAGE_FULL},_IMAGE_NAME=${IMAGE_NAME}" \
+    --region="${REGION}" \
     --project="${PROJECT_ID}"
 success "Cloud Build 完成：${IMAGE_FULL}"
 if [ -n "${GCS_CURRENT}" ]; then
     echo "${GCS_CURRENT}" | gsutil cp - "gs://${GCS_BUCKET}/faiss/last_deployed_built_at.txt"
 fi
 
-# ── Step 4: 部署至 Cloud Run ────────────────────────────────────
-info "Step 8：部署至 Cloud Run（Scale-to-Zero 模式）..."
+# ── Step 5: 部署至 Cloud Run ────────────────────────────────────
+info "Step 5：部署至 Cloud Run（Scale-to-Zero 模式）..."
 
 gcloud run deploy "${SERVICE_NAME}" \
     --image="${IMAGE_FULL}" \
@@ -145,20 +158,21 @@ gcloud run deploy "${SERVICE_NAME}" \
     --concurrency="${CONCURRENCY}" \
     --timeout="${REQUEST_TIMEOUT}" \
     --allow-unauthenticated \
+    --cpu-boost \
     --set-env-vars="GCP_PROJECT_ID=${PROJECT_ID},GCP_REGION=${REGION},GCS_BUCKET=${GCS_BUCKET},GEMINI_API_KEY=${GEMINI_API_KEY},LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET:-},LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN:-}" \
     --quiet
 
 success "Cloud Run 部署完成！"
 
-# ── Step 5: 取得服務 URL ───────────────────────────────────────
+# ── Step 6: 取得服務 URL ───────────────────────────────────────
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
     --region="${REGION}" \
     --format="value(status.url)")
 
 info "服務 URL：${SERVICE_URL}"
 
-# ── Step 6: 健康檢查 ─────────────────────────────────────────
-info "Step 6：執行健康檢查..."
+# ── Step 7: 健康檢查 ─────────────────────────────────────────
+info "Step 7：執行健康檢查..."
 
 # 取得存取 Token
 ACCESS_TOKEN=$(gcloud auth print-identity-token)
@@ -190,7 +204,7 @@ else
     warning "健康檢查回應 HTTP ${HTTP_CODE}（可能是冷啟動，稍後手動測試）"
 fi
 
-# ── Step 7: 輸出部署摘要 ─────────────────────────────────────
+# ── Step 8: 輸出部署摘要 ─────────────────────────────────────
 echo ""
 echo "=================================================================="
 echo "${GREEN}ESG RAG API 部署完成！${NC}"

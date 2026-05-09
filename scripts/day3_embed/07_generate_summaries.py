@@ -174,7 +174,7 @@ def load_company_chunks(gcs_client: storage.Client, ticker: str) -> list[dict]:
         blob_name = f"{prefix}/{ticker}_{REPORT_YEAR}.jsonl"
         blob = bucket.blob(blob_name)
         if blob.exists():
-            content = blob.download_as_text(encoding="utf-8")
+            content = blob.download_as_text(encoding="utf-8-sig")
             chunks = [
                 json.loads(line) for line in content.strip().split("\n")
                 if line.strip()
@@ -294,7 +294,6 @@ def select_chunks_for_pass(chunks: list[dict],
         s = sum(1 for kw in GENERAL_KEYWORDS if kw in text)
         if chunk.get("extraction_method") == "gemini_vision":
             s += 3
-        s += chunk.get("confidence_score", 0.5)
         s += _appendix_bonus(text)
         return s
 
@@ -356,7 +355,7 @@ def _call_model(model: GenerativeModel, prompt: str,
                 temperature=0.3,
                 max_output_tokens=max_output_tokens,
                 response_mime_type="application/json",
-            )
+            ),
         )
         raw = response.text.strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
@@ -364,14 +363,21 @@ def _call_model(model: GenerativeModel, prompt: str,
         raw = match.group() if match else raw
         try:
             if _HAS_JSON_REPAIR:
-                return json.loads(repair_json(raw))
+                result = json.loads(repair_json(raw))
+                if isinstance(result, list):
+                    result = result[0] if result else {}
+                return result
             text = re.sub(r'(?<!\\)[\x00-\x08\x0b\x0c\x0e-\x1f\x0a\x0d]', ' ', raw)
             text = re.sub(r':\s*None\b',  ': null',  text)
             text = re.sub(r':\s*True\b',  ': true',  text)
             text = re.sub(r':\s*False\b', ': false', text)
             text = re.sub(r',\s*([}\]])', r'\1', text)
-            return json.loads(text)
-        except json.JSONDecodeError:
+            result = json.loads(text)
+            if isinstance(result, list):
+                result = result[0] if result else {}
+            return result
+        except json.JSONDecodeError as e:
+            log.warning(f"  JSON parse error at {e.pos}: {raw[max(0,e.pos-80):e.pos+80]!r}")
             if attempt == 1:
                 raise
     return None
@@ -415,7 +421,7 @@ def generate_summary(model: GenerativeModel,
 
         r3 = _call_model(model, PROMPT_PASS3.format(
             company_name=name, ticker=ticker, industry=industry, content=_chunks_to_content(chunks3)),
-            max_output_tokens=8192)
+            max_output_tokens=8192)  # 若 Pass3 被截斷（confidence 欄位缺失/=0），可暫時調高至 16384 補跑後改回
 
         units = {**r1.pop("units", {}), **r2.pop("units", {})}
         summary = {
@@ -471,26 +477,17 @@ def summary_to_chunk(summary: dict) -> dict:
     text = " ".join(filter(None, text_parts))
 
     return {
-        "chunk_id":               f"{ticker}_{summary.get('report_year', REPORT_YEAR)}_overview",
-        "company":                company,
-        "ticker":                 ticker,
-        "industry":               summary.get("industry", ""),
-        "report_year":            summary.get("report_year", REPORT_YEAR),
-        "data_year":              summary.get("report_year", REPORT_YEAR),
-        "reporting_standard":     summary.get("reporting_standards", []),
-        "scope_boundary":         "",
-        "unit":                   "mixed",
-        "embedding_model_version": "text-embedding-004",
-        "output_dimensionality":   768,
-        "extraction_method":      "gemini_summary",
-        "chunk_index":            0,
-        "total_chunks":           1,
-        "text":                   text,
-        "text_preview":           text[:150],
-        "confidence_score":       summary.get("confidence", 0.8),
-        "is_overview":            True,   # 標記為 Overview Chunk，RAG 時優先返回
-        "embedding":              [],
-        "summary_metadata":       summary,  # 完整摘要附加在 metadata
+        "chunk_id":          f"{ticker}_{summary.get('report_year', REPORT_YEAR)}_overview",
+        "company":           company,
+        "ticker":            ticker,
+        "industry":          summary.get("industry", ""),
+        "report_year":       summary.get("report_year", REPORT_YEAR),
+        "extraction_method": "gemini_summary",
+        "chunk_index":       0,
+        "text":              text,
+        "is_overview":       True,
+        "embedding":         [],
+        "summary_metadata":  summary,
     }
 
 
@@ -532,9 +529,13 @@ def main():
     companies = json.loads(
         bucket.blob(f"company_data/company_list_{REPORT_YEAR}.json").download_as_text()
     )
-    if TIER > 0:
-        companies = [c for c in companies if c.get("priority", 4) == TIER]
-        log.info(f"TIER={TIER}，篩選後：{len(companies)} 家")
+    manual_tickers = set(sys.argv[1:])
+    if manual_tickers:
+        companies = [c for c in companies if str(c["ticker"]) in manual_tickers]
+        log.info(f"手動模式：{len(companies)} 家")
+    elif TIER > 0:
+        companies = [c for c in companies if c.get("priority", 4) <= TIER]
+        log.info(f"TIER<={TIER}，篩選後：{len(companies)} 家")
     if TEST_TICKERS:
         companies = [c for c in companies if str(c["ticker"]) in TEST_TICKERS]
         log.info(f"TEST_TICKERS={TEST_TICKERS}，篩選後：{len(companies)} 家")
@@ -572,10 +573,9 @@ def main():
         ticker = company["ticker"]
         log.info(f"\n[{i}/{len(companies)}] {ticker} {company.get('company', '')}")
 
-        # 載入 chunks（文字 + 圖表）
-        text_chunks   = load_company_chunks(gcs_client, ticker)
-        vision_chunks = load_vision_chunks(gcs_client, ticker)
-        all_chunks    = text_chunks + vision_chunks
+        # 載入 chunks（文字only，不使用 vision）
+        text_chunks = load_company_chunks(gcs_client, ticker)
+        all_chunks  = text_chunks
 
         if not text_chunks:
             log.info(f"  跳過：Step 03/04 尚未完成（無文字 chunks）")
@@ -586,7 +586,7 @@ def main():
             results.append({"ticker": ticker, "status": "no_chunks"})
             continue
 
-        log.info(f"  chunks：{len(all_chunks)}（文字 {len(text_chunks)} + 圖表 {len(vision_chunks)}）")
+        log.info(f"  chunks：{len(all_chunks)}（文字 {len(text_chunks)}）")
 
         # 生成摘要（三段式，內部自行選取 chunks）
         summary = generate_summary(model, company, all_chunks)
@@ -604,7 +604,7 @@ def main():
             f"  ✓ 摘要完成 "
             f"（淨零目標：{summary.get('net_zero_target_year', 'N/A')}，"
             f"Scope1：{summary.get('scope1_tco2e', 'N/A')} tCO2e，"
-            f"信心：{summary.get('confidence', 0):.2f}）"
+            f"信心：{float(summary.get('confidence', 0) or 0):.2f}）"
         )
 
         results.append({

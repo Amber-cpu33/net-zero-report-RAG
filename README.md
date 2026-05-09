@@ -1,12 +1,14 @@
 # net-zero-report-RAG｜台灣上市公司 ESG 報告書 RAG 問答系統
 
-透過 LINE 聊天機器人，以自然語言查詢 493 家台灣上市公司的 ESG 永續報告書資料。
+透過 LINE 聊天機器人，以自然語言查詢 490 家台灣上市公司的 ESG 永續報告書資料。
 
 ---
 
 <img width="360" height="360" alt="LINE_BOT" src="https://github.com/user-attachments/assets/96afa52c-2df8-4ed6-a00a-07137e58aee4" />
 
 加入 LINE Bot，直接用中文提問：「台積電的碳排放數據？」、「比較鴻海與廣達的再生能源使用率」
+
+> 資料範圍：2024 年度永續報告書，495 家下載、490 家完成摘要建索引。
 
 | | URL |
 |---|---|
@@ -17,7 +19,7 @@
 
 ## 一、發想
 
-台灣上市公司每年發布永續報告書，但報告書動輒數百頁、格式不一，一般人難以快速查閱特定數據。本專案將 493 家公司的報告書轉化為可查詢的知識庫，讓使用者以對話方式取得 ESG 數據、跨公司比較、甚至追溯原始頁碼。
+台灣上市公司每年發布永續報告書，但報告書動輒數百頁、格式不一，一般人難以快速查閱特定數據。本專案將 490 家公司的報告書轉化為可查詢的知識庫，讓使用者以對話方式取得 ESG 數據、跨公司比較、甚至追溯原始頁碼。
 
 ---
 
@@ -25,13 +27,13 @@
 
 | 層次 | 技術 |
 |------|------|
-| 向量搜尋 | FAISS（123,865 向量，362 MB） |
+| 向量搜尋 | FAISS（149,914 向量，約 439 MB）+ BM25 RRF 融合 |
 | Embedding | Vertex AI `text-embedding-004`（dim=768） |
-| 生成式 AI | Gemini 2.5 Flash（問答）/ Pro（圖表萃取） |
+| 生成式 AI | Gemini 2.5 Flash（問答與摘要生成） |
 | API 框架 | FastAPI + Cloud Run |
 | 對話介面 | LINE Bot SDK |
 | 雲端基礎設施 | GCP（Cloud Run、GCS、Vertex AI、Artifact Registry） |
-| PDF 解析 | pdfplumber + Gemini Vision（圖表）|
+| PDF 解析 | pdfplumber（純文字策略，v3） |
 
 ---
 
@@ -39,7 +41,7 @@
 
 ### Pipeline 設計
 
-報告書資料分兩軌處理：**文字 chunks**（pdfplumber 解析）與 **Vision chunks**（Gemini Pro 解析圖表與表格）。兩軌合併後透過 Vertex AI Batch Embedding 轉為向量，建立 FAISS 索引。
+報告書以 pdfplumber 解析為文字 chunks，透過 Vertex AI Batch Embedding 轉為向量，建立 FAISS 索引；同時建立 BM25 倒排索引，查詢時以 RRF 融合兩路結果提升召回率。
 
 查詢時採三段式流程：
 1. **parse_query**：Gemini 解析問句意圖（公司、指標、是否需頁碼）
@@ -54,10 +56,10 @@
 
 | 天 | 里程碑 |
 |----|--------|
-| Day 1 | 公司清單建立、PDF 批次下載（493 家） |
+| Day 1 | 公司清單建立、PDF 批次下載（495 家） |
 | Day 2 | PDF 解析與文字分塊 |
 | Day 3 | Vertex AI Batch Embedding + FAISS 索引建立 |
-| Day 4 | Gemini Vision 圖表萃取（高碳排產業優先） |
+| Day 4 | Gemini Vision 圖表萃取（高碳排產業優先，v3 改為純文字策略） |
 | Day 5 | 公司摘要生成（Step 07，三段式萃取） |
 | Day 6 | FastAPI 部署 Cloud Run + LINE Bot 上線 |
 | Day 7 | API 實測修正 LLM Prompt |
@@ -95,7 +97,7 @@ esg-pipeline/
 │   ├── day6_faiss/       # 08 FAISS 索引建立
 │   └── day7_deploy/      # 09 Cloud Run 部署腳本
 ├── company_list_2024.json
-└── pipeline_rebuild_guide.md
+└── evaluation/              # RAGAS 評估腳本與問題集
 ```
 
 ---
@@ -110,7 +112,7 @@ esg-pipeline/
 | 02 | `day1_collect/02_download_pdfs.py` | 批次下載 PDF 至 GCS |
 | 03 | `day2_parse/03_pdf_parse_and_chunk.py` | PDF 解析、文字分塊 |
 | 04 | `day3_embed/04_submit_embedding_batch.py` | Vertex AI Batch Embedding |
-| 05 | `day4_vision/05_vision_chart_extract.py` | Gemini Vision 圖表萃取 |
+| 05 | `day4_vision/05_vision_chart_extract.py` | Gemini Vision 圖表萃取（v3 凍結，改為純文字策略） |
 | 07 | `day3_embed/07_generate_summaries.py` | 公司 ESG 摘要生成 |
 | 08 | `day6_faiss/08_build_faiss_index.py` | FAISS 索引建立 |
 | 09 | `day7_deploy/09_build_and_deploy.sh` | Docker build + Cloud Run 部署 |
@@ -137,3 +139,13 @@ uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 | `POST /webhook` | LINE Bot Webhook |
 
 **可比較指標**：`scope1_tco2e` / `scope2_tco2e` / `scope3_tco2e` / `renewable_energy_pct` / `total_energy_gj` / `water_withdrawal_m3` / `waste_total_ton`
+
+---
+
+## 七、FAISS 索引改版紀錄
+
+| 版本 | 時間 | 向量數 | 說明 |
+|------|------|--------|------|
+| v1 | 2026-04 | ~123,865 | 初版，含 Vision chunks（Gemini Pro 圖表萃取），部分公司完成 |
+| v2 | 2026-05-02 | ~130,000 | 補跑 16 家失敗公司，Vision 策略維持 |
+| v3 | 2026-05-05 | 149,914 | 全量重建（490 家），改為純文字策略，新增 BM25 RRF 融合，為現行版本 |

@@ -15,6 +15,13 @@ data/
 api/faiss_index/
 *.pdf
 
+# 暫存 chunks
+tmp_chunks/
+
+# 本地操作指引
+pipeline_rebuild_guide.md
+scripts/run_pipeline.sh
+
 # 暫存檔
 tmp_result.json
 parse_report.json
@@ -24,6 +31,12 @@ vm相關指令.txt
 
 # logs 全排除
 logs/
+
+# evaluation 只保留腳本與問題集
+evaluation/RAGAS_log/
+evaluation/RAGAS_sample/
+evaluation/ground_truth_answer/
+evaluation/year_check_*.csv
 
 # 封存與診斷腳本
 scripts/archive/

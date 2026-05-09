@@ -28,6 +28,7 @@ FAISS 設計選擇：
 import json
 import logging
 import os
+import pickle
 import time
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ from tqdm import tqdm
 
 import numpy as np
 import faiss
+import jieba
 import vertexai
 from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 from google.cloud import storage
@@ -60,6 +62,8 @@ LOCAL_OUTPUT_DIR  = Path(__file__).parents[2] / "api" / "faiss_index"
 FAISS_INDEX_FILE  = "index.faiss"
 METADATA_FILE     = "metadata.jsonl"
 STATS_FILE        = "index_stats.json"
+BM25_TOKENS_FILE  = "bm25_tokens.pkl"
+BM25_INDEX_FILE   = "bm25_index.pkl"
 
 # Online Embedding 速率限制（補齊沒有向量的 chunk 用）
 ONLINE_EMBED_BATCH_SIZE  = 50    # overview 文字長，token 限制 20000，50 筆安全
@@ -275,6 +279,23 @@ def save_index_locally(faiss_index: faiss.Index,
     stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info(f"統計資訊：{stats}")
 
+    # 預建 BM25 corpus tokens 與倒排索引（避免 Cloud Run 啟動時重建超時）
+    from rank_bm25 import BM25Okapi
+    bm25_path = output_dir / BM25_TOKENS_FILE
+    log.info("預建 BM25 corpus tokens（jieba）...")
+    jieba.setLogLevel(logging.WARNING)
+    bm25_tokens = [list(jieba.cut(m.get("text", ""))) for m in metadata_list]
+    with open(bm25_path, "wb") as f:
+        pickle.dump(bm25_tokens, f)
+    log.info(f"BM25 tokens 已儲存：{bm25_path} ({bm25_path.stat().st_size // 1024 // 1024} MB)")
+
+    log.info("預建 BM25 倒排索引（BM25Okapi）...")
+    bm25_index = BM25Okapi(bm25_tokens)
+    bm25_index_path = output_dir / BM25_INDEX_FILE
+    with open(bm25_index_path, "wb") as f:
+        pickle.dump(bm25_index, f)
+    log.info(f"BM25 index 已儲存：{bm25_index_path} ({bm25_index_path.stat().st_size // 1024 // 1024} MB)")
+
     return faiss_path, metadata_path
 
 
@@ -286,10 +307,14 @@ def upload_index_to_gcs(gcs_client: storage.Client,
     bucket = gcs_client.bucket(BUCKET_NAME)
 
     uris = {}
+    bm25_path       = faiss_path.parent / BM25_TOKENS_FILE
+    bm25_index_path = faiss_path.parent / BM25_INDEX_FILE
     for local_path, gcs_name in [
-        (faiss_path,   f"faiss/{FAISS_INDEX_FILE}"),
-        (metadata_path, f"faiss/{METADATA_FILE}"),
-        (stats_path,   f"faiss/{STATS_FILE}"),
+        (faiss_path,      f"faiss/{FAISS_INDEX_FILE}"),
+        (metadata_path,   f"faiss/{METADATA_FILE}"),
+        (stats_path,      f"faiss/{STATS_FILE}"),
+        (bm25_path,       f"faiss/{BM25_TOKENS_FILE}"),
+        (bm25_index_path, f"faiss/{BM25_INDEX_FILE}"),
     ]:
         with open(local_path, "rb") as f:
             bucket.blob(gcs_name).upload_from_file(f)
@@ -332,7 +357,7 @@ def verify_index(faiss_index: faiss.Index, metadata_list: list[dict]) -> bool:
         sample = metadata_list[top_idx]
         log.info(
             f"  ✓ Top-1 結果：{sample.get('ticker', 'N/A')} - "
-            f"{sample.get('text_preview', '')[:60]}..."
+            f"{sample.get('text', '')[:60]}..."
         )
 
     log.info("  ✓ 索引驗證通過！")

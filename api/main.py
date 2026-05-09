@@ -150,6 +150,7 @@ async def query_esg(request: Request, req: QueryRequest):
             {
                 "company":    s.get("company", ""),
                 "ticker":     s.get("ticker", ""),
+                "chunk_id":   s.get("chunk_id", ""),
                 "text":       s.get("text", "")[:200],
                 "score":      s.get("score", 0),
                 "data_year":  s.get("data_year"),
