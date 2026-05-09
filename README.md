@@ -33,7 +33,7 @@
 | API 框架 | FastAPI + Cloud Run |
 | 對話介面 | LINE Bot SDK |
 | 雲端基礎設施 | GCP（Cloud Run、GCS、Vertex AI、Artifact Registry） |
-| PDF 解析 | pdfplumber（純文字策略，v3） |
+| PDF 解析 | PyMuPDF（純文字策略，v3） |
 
 ---
 
@@ -41,7 +41,7 @@
 
 ### Pipeline 設計
 
-報告書以 pdfplumber 解析為文字 chunks，透過 Vertex AI Batch Embedding 轉為向量，建立 FAISS 索引；同時建立 BM25 倒排索引，查詢時以 RRF 融合兩路結果提升召回率。
+報告書以 PyMuPDF 解析為文字 chunks，透過 Vertex AI Batch Embedding 轉為向量，建立 FAISS 索引；同時建立 BM25 倒排索引，查詢時以 RRF 融合兩路結果提升召回率。
 
 查詢時採三段式流程：
 1. **parse_query**：Gemini 解析問句意圖（公司、指標、是否需頁碼）
