@@ -32,7 +32,7 @@ COPY --from=builder /app/packages /app/packages
 ENV PYTHONPATH="/app/packages:${PYTHONPATH:-}"
 
 # 複製應用程式碼
-COPY main.py state.py search.py rag.py line_bot.py ./
+COPY main.py state.py search.py rag.py prompts.py line_bot.py ./
 COPY faiss_index/ ./faiss_index/
 
 # Cloud Run 使用 PORT 環境變數
