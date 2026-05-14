@@ -199,7 +199,8 @@ def search_esg_knowledge_base(
             "category":    meta.get("category", "text"),
             "indicator":   meta.get("indicator", ""),
             "value":       meta.get("value"),
-            "source_page": (meta.get("source_pages") or [None])[0],
+            "source_pages": meta.get("source_pages") or [],
+            "source_page":  (meta.get("source_pages") or [None])[0],
             "is_overview": meta.get("is_overview", False),
         })
 
