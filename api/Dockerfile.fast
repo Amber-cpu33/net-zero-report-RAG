@@ -13,7 +13,7 @@ COPY --from=previous /app/faiss_index /app/faiss_index
 
 ENV PYTHONPATH="/app/packages:${PYTHONPATH:-}"
 
-COPY main.py state.py search.py rag.py line_bot.py ./
+COPY main.py state.py search.py rag.py prompts.py line_bot.py ./
 
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
