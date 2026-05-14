@@ -83,7 +83,8 @@ esg-pipeline/
 ├── api/
 │   ├── state.py          # 全域狀態與常數（FAISS、Embedding model）
 │   ├── search.py         # 向量搜尋、公司比較、資料查詢
-│   ├── rag.py            # Query Understanding、RAG 生成
+│   ├── prompts.py        # Prompt 常數、Jailbreak 規則、固定回覆字串
+│   ├── rag.py            # Query Understanding、RAG 生成（意圖解析、路由、合成）
 │   ├── main.py           # FastAPI 路由
 │   ├── line_bot.py       # LINE Webhook + 多輪對話管理
 │   ├── Dockerfile        # 完整建置（含 FAISS index）
@@ -96,6 +97,7 @@ esg-pipeline/
 │   ├── day4_vision/      # 05 Gemini Vision 圖表萃取
 │   ├── day6_faiss/       # 08 FAISS 索引建立
 │   └── day7_deploy/      # 09 Cloud Run 部署腳本
+├── utils/                   # 本地診斷、驗證、測試腳本（不部署）
 ├── company_list_2024.json
 └── evaluation/              # RAGAS 評估腳本與問題集
 ```

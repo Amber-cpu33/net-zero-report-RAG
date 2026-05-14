@@ -78,6 +78,66 @@ def embed_query(text: str) -> np.ndarray:
 TOC_PENALTY = 0.3  # 非結構性查詢時目錄 chunk 的分數乘數
 
 
+def _build_candidate_indices(
+    ticker_filter: Optional[str],
+    tickers_filter: Optional[list[str]],
+    industry_filter: Optional[str],
+) -> Optional[list[int]]:
+    if tickers_filter and state.ticker_chunk_indices:
+        indices = []
+        for t in tickers_filter:
+            indices.extend(state.ticker_chunk_indices.get(t, []))
+        return indices
+    if industry_filter and state.industry_chunk_indices:
+        return list(state.industry_chunk_indices.get(industry_filter, []))
+    if ticker_filter and state.ticker_chunk_indices:
+        return state.ticker_chunk_indices.get(ticker_filter, [])
+    return None
+
+
+def _build_faiss_ranks(
+    query_vector: np.ndarray,
+    candidate_indices: Optional[list[int]],
+    top_k: int,
+) -> dict[int, int]:
+    if candidate_indices is not None:
+        candidate_idx_arr = np.array(candidate_indices, dtype=np.int64)
+        vectors = np.zeros((len(candidate_indices), EMBEDDING_DIM), dtype=np.float32)
+        state.faiss_index.reconstruct_batch(candidate_idx_arr, vectors)
+        raw_scores = (vectors @ query_vector.T).flatten()
+        order = np.argsort(raw_scores)[::-1][:top_k * 3]
+        pairs = [(float(raw_scores[j]), candidate_indices[j]) for j in order]
+    else:
+        search_k = min(top_k * 3, state.faiss_index.ntotal)
+        raw_scores, raw_indices = state.faiss_index.search(query_vector, k=search_k)
+        pairs = list(zip(raw_scores[0], raw_indices[0]))
+    return {idx: rank for rank, (_, idx) in enumerate(pairs) if idx >= 0}
+
+
+def _build_bm25_ranks(
+    query_tokens: list[str],
+    candidate_indices: Optional[list[int]],
+) -> dict[int, int]:
+    if state.bm25_index is None:
+        return {}
+    if candidate_indices is not None:
+        if state.bm25_corpus_tokens is not None:
+            # 子集重建 BM25（精確 IDF）
+            candidate_texts = [state.bm25_corpus_tokens[i] for i in candidate_indices]
+            sub_bm25 = BM25Okapi(candidate_texts)
+            bm25_scores = sub_bm25.get_scores(query_tokens)
+            ranked = sorted(enumerate(candidate_indices), key=lambda x: bm25_scores[x[0]], reverse=True)
+            return {global_idx: rank for rank, (_, global_idx) in enumerate(ranked)}
+        else:
+            # 用全庫 BM25 分數取 candidate 子集排名（bm25_index.pkl 模式）
+            all_scores = state.bm25_index.get_scores(query_tokens)
+            ranked = sorted(candidate_indices, key=lambda i: all_scores[i], reverse=True)
+            return {global_idx: rank for rank, global_idx in enumerate(ranked)}
+    bm25_scores = state.bm25_index.get_scores(query_tokens)
+    ranked_indices = np.argsort(bm25_scores)[::-1]
+    return {int(idx): rank for rank, idx in enumerate(ranked_indices)}
+
+
 def search_esg_knowledge_base(
     query: str,
     top_k: int = TOP_K_RESULTS,
@@ -97,58 +157,17 @@ def search_esg_knowledge_base(
         raise RuntimeError("FAISS 索引未載入")
 
     query_vector = embed_query(query)
-    candidate_indices: Optional[list[int]] = None
-    if tickers_filter and state.ticker_chunk_indices:
-        candidate_indices = []
-        for t in tickers_filter:
-            candidate_indices.extend(state.ticker_chunk_indices.get(t, []))
-    elif industry_filter and state.industry_chunk_indices:
-        candidate_indices = list(state.industry_chunk_indices.get(industry_filter, []))
-    elif ticker_filter and state.ticker_chunk_indices:
-        candidate_indices = state.ticker_chunk_indices.get(ticker_filter, [])
+    candidate_indices = _build_candidate_indices(ticker_filter, tickers_filter, industry_filter)
+    if candidate_indices is not None and not candidate_indices:
+        return []
 
-    if candidate_indices is not None:
-        if not candidate_indices:
-            return []
-        candidate_idx_arr = np.array(candidate_indices, dtype=np.int64)
-        vectors = np.zeros((len(candidate_indices), EMBEDDING_DIM), dtype=np.float32)
-        state.faiss_index.reconstruct_batch(candidate_idx_arr, vectors)
-        raw_scores = (vectors @ query_vector.T).flatten()
-        order = np.argsort(raw_scores)[::-1][:top_k * 3]
-        pairs = [(float(raw_scores[j]), candidate_indices[j]) for j in order]
-    else:
-        search_k = min(top_k * 3, state.faiss_index.ntotal)
-        raw_scores, raw_indices = state.faiss_index.search(query_vector, k=search_k)
-        pairs = list(zip(raw_scores[0], raw_indices[0]))
+    faiss_ranks = _build_faiss_ranks(query_vector, candidate_indices, top_k)
 
-    # FAISS 排名表：{global_idx: rank}
-    faiss_ranks = {idx: rank for rank, (_, idx) in enumerate(pairs) if idx >= 0}
-
-    # BM25 搜尋（限定 candidate_indices 範圍）
     bm25_ranks: dict[int, int] = {}
-    if USE_BM25 and state.bm25_index is not None:
+    if USE_BM25:
         query_tokens = list(jieba.cut(query))
-        if candidate_indices is not None:
-            if state.bm25_corpus_tokens is not None:
-                # 子集重建 BM25（精確 IDF）
-                candidate_texts = [state.bm25_corpus_tokens[i] for i in candidate_indices]
-                sub_bm25 = BM25Okapi(candidate_texts)
-                bm25_scores = sub_bm25.get_scores(query_tokens)
-                ranked = sorted(
-                    enumerate(candidate_indices), key=lambda x: bm25_scores[x[0]], reverse=True
-                )
-                bm25_ranks = {global_idx: rank for rank, (_, global_idx) in enumerate(ranked)}
-            else:
-                # 用全庫 BM25 分數取 candidate 子集排名（bm25_index.pkl 模式）
-                all_scores = state.bm25_index.get_scores(query_tokens)
-                ranked = sorted(candidate_indices, key=lambda i: all_scores[i], reverse=True)
-                bm25_ranks = {global_idx: rank for rank, global_idx in enumerate(ranked)}
-        else:
-            bm25_scores = state.bm25_index.get_scores(query_tokens)
-            ranked_indices = np.argsort(bm25_scores)[::-1]
-            bm25_ranks = {int(idx): rank for rank, idx in enumerate(ranked_indices)}
+        bm25_ranks = _build_bm25_ranks(query_tokens, candidate_indices)
 
-    # 決定要輸出的候選集（FAISS + BM25 聯集，上限 top_k * 5）
     candidate_set = set(faiss_ranks.keys())
     if bm25_ranks:
         top_bm25 = sorted(bm25_ranks, key=bm25_ranks.get)[:top_k * 3]
@@ -160,30 +179,28 @@ def search_esg_knowledge_base(
             continue
         meta = state.metadata[idx]
 
-        # RRF 融合分數
         faiss_rrf = 1.0 / (RRF_K + faiss_ranks.get(idx, 9999))
         bm25_rrf  = 1.0 / (RRF_K + bm25_ranks.get(idx, 9999)) if bm25_ranks else 0.0
         rrf_score = faiss_rrf + bm25_rrf
 
         if meta.get("is_overview"):
-            rrf_score += OVERVIEW_BOOST * 0.1  # overview boost 縮小比例，避免干擾 RRF
-
+            rrf_score += OVERVIEW_BOOST * 0.1
         if meta.get("is_toc") and not structural_query:
             rrf_score *= TOC_PENALTY
 
         results.append({
-            "score":            round(rrf_score, 6),
-            "chunk_id":         meta.get("chunk_id", ""),
-            "company":          meta.get("company", ""),
-            "ticker":           meta.get("ticker", ""),
-            "industry":         meta.get("industry", ""),
-            "text":             meta.get("text", ""),
-            "data_year":        meta.get("report_year"),
-            "category":         meta.get("category", "text"),
-            "indicator":        meta.get("indicator", ""),
-            "value":            meta.get("value"),
-            "source_page":      (meta.get("source_pages") or [None])[0],
-            "is_overview":      meta.get("is_overview", False),
+            "score":       round(rrf_score, 6),
+            "chunk_id":    meta.get("chunk_id", ""),
+            "company":     meta.get("company", ""),
+            "ticker":      meta.get("ticker", ""),
+            "industry":    meta.get("industry", ""),
+            "text":        meta.get("text", ""),
+            "data_year":   meta.get("report_year"),
+            "category":    meta.get("category", "text"),
+            "indicator":   meta.get("indicator", ""),
+            "value":       meta.get("value"),
+            "source_page": (meta.get("source_pages") or [None])[0],
+            "is_overview": meta.get("is_overview", False),
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -232,10 +249,8 @@ def compare_companies(tickers: list[str], metric: str) -> list[dict]:
 
 def get_company_overview(ticker: str) -> Optional[dict]:
     """取得單一公司的 ESG 概況（summary_metadata）；無 overview chunk 時回傳 None"""
-    for meta in state.metadata:
-        if meta.get("ticker") == ticker and meta.get("is_overview"):
-            return meta.get("summary_metadata") or {}
-    return None
+    overview = state.overview_index.get(ticker) if state.overview_index else None
+    return overview.get("summary_metadata") or {} if overview else None
 
 
 def lookup_company(name: str) -> list[dict]:

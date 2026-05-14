@@ -27,7 +27,7 @@ from state import (
     PROJECT_ID, GEMINI_API_KEY, EMBEDDING_MODEL, GENERATION_MODEL, EMBEDDING_DIM,
 )
 from search import compare_companies, _metric_to_chinese, _get_metric_unit
-from rag import agentic_rag, parse_query, build_esg_tools
+from rag import agentic_rag, parse_query
 from line_bot import register_line_bot
 
 log = logging.getLogger(__name__)
@@ -80,7 +80,6 @@ async def lifespan(app: FastAPI):
 
     state.embed_model = TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL)
     state.gen_client  = genai.Client(api_key=GEMINI_API_KEY)
-    state.esg_tools   = build_esg_tools()
     state.loaded_at   = datetime.utcnow().isoformat()
 
     log.info(f"  Embedding 模型：{EMBEDDING_MODEL}（Vertex AI）")

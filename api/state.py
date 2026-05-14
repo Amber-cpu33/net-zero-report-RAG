@@ -57,7 +57,6 @@ class AppState:
     stats:                   Optional[dict]              = None
     embed_model:             Optional[TextEmbeddingModel] = None
     gen_client:              Optional[genai.Client]      = None
-    esg_tools:               Optional[types.Tool]        = None
     company_index:           Optional[dict]              = None
     overview_index:          Optional[dict]              = None
     ticker_counts:           Optional[dict]              = None
